@@ -1,0 +1,88 @@
+#!/bin/sh
+# sudo bash /usr/share/examples/ipfw/change_rules.sh
+
+ipfw table 22 destroy
+ipfw table 22 create
+
+# Flush out the list before we begin.
+ipfw -q -f flush
+
+# Set rules command prefix
+cmd="ipfw -q add"
+pif="vtnet0"     # interface name of NIC attached to Internet
+skip="skipto 01001"
+
+# Wireguard
+wg_port="51820" # listen port
+wg_subnet="100.64.1.0/24" # subnet
+wg_iface="wg0"
+
+# ===============
+
+# rate limit logging
+sysctl net.inet.ip.fw.verbose_limit=5
+# allow in kernel NAT
+sysctl net.inet.tcp.tso=0
+# forward traffic
+sysctl net.inet.ip.forwarding=1
+
+# NAT
+ipfw disable one_pass
+ipfw -q nat 1 config if $pif same_ports reset #unreg_only reset
+
+# No restrictions on Loopback Interface
+$cmd 00010 allow all from any to any via lo0
+$cmd 00011 allow ip from any to any via $wg_iface
+
+$cmd 00012 check-state
+
+# ======= Outbound
+
+# allow all outbound
+$cmd 00200 allow all  from me to any out via $pif keep-state
+
+# wg over wg interface
+$cmd 00204 $skip all from $wg_subnet to $wg_subnet out via $wg_iface setup keep-state
+
+# wg over primary interface
+$cmd 00207 $skip all  from $wg_subnet to any out via $pif setup keep-state
+
+# Reject and log all other outgoing connections
+$cmd 00299 deny log all from any to any out via $pif
+
+# ======= Inbound
+
+# Deny all inbound traffic from non-routable reserved address spaces
+$cmd 00300 deny all from 192.168.0.0/16 to me in via $pif    #RFC 1918 private IP
+$cmd 00301 deny all from 172.16.0.0/12 to me in via $pif     #RFC 1918 private IP
+$cmd 00302 deny all from 10.0.0.0/8 to me in via $pif        #RFC 1918 private IP
+$cmd 00303 deny all from 127.0.0.0/8 to me in via $pif       #loopback
+$cmd 00304 deny all from 0.0.0.0/8 to me in via $pif         #loopback
+$cmd 00305 deny all from 169.254.0.0/16 to me in via $pif    #DHCP auto-config
+$cmd 00306 deny all from 192.0.2.0/24 to me in via $pif      #reserved for docs
+$cmd 00307 deny all from 204.152.64.0/23 to me in via $pif   #Sun cluster interconnect
+$cmd 00308 deny all from 224.0.0.0/3 to me in via $pif       #Class D & E multicast
+
+# SSH guard
+$cmd 00380 reset ip from table\(22\) to me in via $pif
+
+# Allow icmp
+$cmd 00390 allow icmp from any to me in via $pif keep-state
+
+$cmd 00400 allow all from 10.10.0.0/16 to me in via $pif setup keep-state
+$cmd 00403 allow tcp from any to me dst-port 22 in via $pif setup keep-state
+$cmd 00404 allow tcp from any to me dst-port 80 in via $pif setup keep-state
+$cmd 00405 allow tcp from any to me dst-port 443 in via $pif setup keep-state
+
+# wireguard
+$cmd 00409 allow udp from any to me dst-port $wg_port in via $pif keep-state
+
+# Reject and log all other incoming connections
+$cmd 00999 deny log all from any to any in via $pif
+
+# Everything else is denied and logged
+$cmd 01000 deny log all from any to any
+
+# NAT
+$cmd 01001 nat 1 ip from any to any out via $pif # skipto location for outbound stateful rules
+$cmd 01002 allow ip from any to any
